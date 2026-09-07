@@ -20,6 +20,7 @@ import urllib.request
 from pathlib import Path
 
 import streamlit as st
+from streamlit.components.v1 import html as _html
 
 from ricerca import Ricerca
 
@@ -216,6 +217,63 @@ if not chiave():
     st.stop()
 
 controlla_accesso()
+
+
+# ------------------------------------------------- avviso di primo utilizzo
+
+AVVISO = """
+<script>
+(function () {
+  // L'avviso viene costruito nella pagina vera e non dentro questo riquadro,
+  // perche' un riquadro di Streamlit non puo' coprire lo schermo. Se il
+  // browser lo impedisce non succede nulla: l'app funziona lo stesso.
+  try {
+    var doc = window.parent.document;
+    if (doc.getElementById("bn-avviso")) return;                       // gia' a video
+    try { if (window.parent.localStorage.getItem("bn_avviso") === "1") return; }
+    catch (e) { /* navigazione privata: l'avviso si rivedra', pazienza */ }
+
+    var v = doc.createElement("div");
+    v.id = "bn-avviso";
+    v.style.cssText = "position:fixed;inset:0;z-index:99999;background:rgba(12,22,35,.55);" +
+      "display:flex;align-items:center;justify-content:center;padding:1.2rem;" +
+      "font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif";
+    v.innerHTML =
+      '<div style="background:#fff;max-width:460px;width:100%;border-radius:12px;' +
+        'padding:1.6rem 1.7rem;box-shadow:0 18px 50px rgba(0,0,0,.3);' +
+        'border-top:4px solid #B8862F">' +
+        '<div style="font-size:1.15rem;font-weight:650;color:#17456F;margin-bottom:.7rem">' +
+          'La prima ricerca è lenta</div>' +
+        '<div style="font-size:.95rem;line-height:1.55;color:#23364a">' +
+          'La prima domanda dopo l\'apertura richiede in media <b>2-3 minuti</b>: ' +
+          'in quel tempo il sistema carica l\'intero archivio normativo. ' +
+          'Le domande successive rispondono in pochi secondi.' +
+          '<br><br>Mentre aspetti <b>non chiudere e non ricaricare la pagina</b>: ' +
+          'il caricamento ripartirebbe da capo.' +
+        '</div>' +
+        '<label style="display:flex;align-items:center;gap:.5rem;margin:1.2rem 0 1.1rem;' +
+          'font-size:.88rem;color:#4a5a6b;cursor:pointer">' +
+          '<input type="checkbox" id="bn-mai" style="width:16px;height:16px;cursor:pointer">' +
+          'Non mostrare più questo messaggio</label>' +
+        '<button id="bn-ok" style="width:100%;padding:.65rem;border:0;border-radius:8px;' +
+          'background:#17456F;color:#fff;font-size:.95rem;font-weight:600;cursor:pointer">' +
+          'Ho capito</button>' +
+      '</div>';
+    doc.body.appendChild(v);
+
+    doc.getElementById("bn-ok").onclick = function () {
+      if (doc.getElementById("bn-mai").checked) {
+        try { window.parent.localStorage.setItem("bn_avviso", "1"); } catch (e) {}
+      }
+      v.remove();
+    };
+  } catch (e) {}
+})();
+</script>
+"""
+
+_html(AVVISO, height=0)
+
 
 ricerca = carica()
 
