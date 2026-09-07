@@ -109,13 +109,22 @@ def _genera(prompt: str, timeout: int = 90, tentativi: int = 3) -> str:
     raise RuntimeError("Nessun modello disponibile. " + " | ".join(errori))
 
 
-RIFORMULA = """Riscrivi la domanda nei termini usati dalla legge italiana, per cercare in un archivio normativo.
+RIFORMULA = """Scrivi in una sola riga la RICERCA da fare in un archivio di norme italiane.
+
+L'ultimo messaggio puo' essere la RISPOSTA a una domanda che l'assistente ha appena
+fatto: in quel caso la ricerca riguarda il quesito originale del consulente,
+completato con il dato appena ricevuto ("del commercio", dopo "in quale settore?",
+vuol dire infortunio sul lavoro nel settore del commercio).
+
 - Usa il lessico giuridico corrispondente ("asse ereditario" -> "successione, diritto proprio del beneficiario"; "smart working" -> "lavoro agile").
 - Aggiungi 4-8 parole chiave che comparirebbero nell'articolo pertinente.
 - Se c'e' una negazione rilevante ("senza testamento"), esplicita l'istituto corretto.
 - Non rispondere alla domanda. Una sola riga.
 
-Domanda: {d}"""
+CONVERSAZIONE FINORA (puo' essere vuota):
+{storia}
+
+ULTIMO MESSAGGIO DEL CONSULENTE: {d}"""
 
 REGOLE = """Sei l'assistente normativo di una rete di consulenti assicurativi. Parli a un consulente, non al cliente finale.
 
@@ -126,11 +135,12 @@ Come rispondere:
 - Ricava dalla domanda i dati che sono gia' impliciti: chi dice "sono stato assunto" o "sono un dipendente" e' un lavoratore subordinato; chi dice "un mio cliente" parla di un terzo.
 - Solo DOPO, se resta un dato davvero mancante (grado di parentela, tipo di rapporto di lavoro, presenza di testamento, dinamica dell'infortunio), chiedilo in fondo, in una riga.
 - Se gli articoli non bastano, dillo apertamente e indica cosa manca. Non colmare i vuoti.
+- Se l'ultimo messaggio risponde a una domanda che hai fatto tu, NON ripartire da capo: riprendi il quesito originale e rispondi usando il dato appena ricevuto.
 
 Titoli e settori:
 - Alcune citazioni indicano il Titolo dell'atto, per esempio "(Titolo II — agricoltura)". Quel comma vale SOLO per quel settore.
 - Non applicare un articolo dell'agricoltura a un caso dell'industria o viceversa, nemmeno se dice la cosa giusta: le soglie sono diverse.
-- Se il settore non e' noto e cambia la risposta, chiedilo; se non cambia la risposta, non chiederlo.
+- Chiedi il settore SOLO se fra gli articoli qui sotto ce ne sono due che regolano la stessa materia in Titoli diversi e la risposta cambia a seconda di quale si applica. Se la norma che risponde non porta indicazione di Titolo, vale in generale: non chiedere il settore.
 
 Citazioni:
 - Fra parentesi quadre va SOLO il riferimento normativo, copiato esatto dall'intestazione dell'articolo, per esempio [D.P.R. 1124/1965, art. 2, comma 3].
@@ -139,10 +149,13 @@ Citazioni:
 
 Italiano asciutto e professionale. Nessuna premessa.
 
+CONVERSAZIONE FINORA (puo' essere vuota):
+{storia}
+
 ARTICOLI DISPONIBILI:
 {contesto}
 
-DOMANDA DEL CONSULENTE: {domanda}"""
+ULTIMO MESSAGGIO DEL CONSULENTE: {domanda}"""
 
 
 @st.cache_resource(show_spinner="Preparo l'archivio normativo — al primo avvio serve un minuto…")
@@ -159,16 +172,32 @@ def carica() -> Ricerca:
     return r
 
 
-def rispondi(domanda: str, ricerca: Ricerca):
+def _conversazione(storia: list[dict], battute: int = 2) -> str:
+    """Le ultime battute, in chiaro.
+
+    Senza questo l'assistente puo' chiedere un dato ("in quale settore?") e poi
+    non essere in grado di leggere la risposta: ogni messaggio veniva trattato
+    come una domanda a se' stante, e "del commercio" da solo non vuol dire nulla.
+    """
+    recenti = [v for v in storia if v.get("testo")][-battute * 2:]
+    return "\n".join(
+        ("CONSULENTE: " if v["ruolo"] == "user" else "ASSISTENTE: ") + v["testo"][:700]
+        for v in recenti)
+
+
+def rispondi(domanda: str, ricerca: Ricerca, storia: list[dict] | None = None):
+    conversazione = _conversazione(storia or [])
     try:
-        riscritta = _genera(RIFORMULA.format(d=domanda), timeout=40).strip().split("\n")[0]
+        riscritta = _genera(RIFORMULA.format(d=domanda, storia=conversazione or "(nessuna)"),
+                            timeout=40).strip().split("\n")[0]
     except Exception:
         riscritta = domanda      # se la traduzione fallisce si cerca la domanda originale
     trovati = ricerca.cerca(riscritta, k=8)
     contesto = "\n\n".join(
         f"[{x.voce['citation']}] (vigente dal {x.voce.get('validity_start') or 'n.d.'})\n{x.voce['text']}"
         for x in trovati)
-    testo = _genera(REGOLE.format(contesto=contesto, domanda=domanda))
+    testo = _genera(REGOLE.format(contesto=contesto, domanda=domanda,
+                                  storia=conversazione or "(nessuna)"))
     return testo, trovati, riscritta
 
 
@@ -329,13 +358,14 @@ if "precompilata" in st.session_state:
     domanda = st.session_state.pop("precompilata")
 
 if domanda:
+    precedenti = list(st.session_state.storia)   # prima di aggiungere il nuovo messaggio
     st.session_state.storia.append({"ruolo": "user", "testo": domanda})
     with st.chat_message("user"):
         st.markdown(domanda)
     with st.chat_message("assistant"):
         with st.spinner("Cerco negli articoli…"):
             try:
-                testo, trovati, riscritta = rispondi(domanda, ricerca)
+                testo, trovati, riscritta = rispondi(domanda, ricerca, precedenti)
             except Exception as exc:
                 testo, trovati, riscritta = f"⚠️ {exc}", [], ""
         st.markdown(testo)
