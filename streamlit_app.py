@@ -221,7 +221,7 @@ controlla_accesso()
 
 # ------------------------------------------------- avviso di primo utilizzo
 
-AVVISO = """
+AVVISO = r"""
 <script>
 (function () {
   // L'avviso viene costruito nella pagina vera e non dentro questo riquadro,
