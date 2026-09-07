@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -45,20 +46,50 @@ def chiave() -> str:
     return ""
 
 
-def _genera(prompt: str, timeout: int = 90) -> str:
+RITENTABILI = {429, 500, 502, 503}
+
+
+def _genera(prompt: str, timeout: int = 90, tentativi: int = 3) -> str:
+    """Chiede al modello di scrivere la risposta.
+
+    I modelli gratuiti rispondono 503 quando sono sovraccarichi: e' una
+    condizione che dura secondi, non un guasto. Per questo ogni modello viene
+    ritentato con attesa crescente prima di passare al successivo — cambiare
+    modello al primo errore non serve, perche' il sovraccarico li colpisce
+    tutti insieme.
+    """
     corpo = json.dumps({"contents": [{"parts": [{"text": prompt}]}]}).encode()
     errori = []
     for m in MODELLI:
-        try:
-            req = urllib.request.Request(
-                f"{BASE}/{m}:generateContent?key={chiave()}",
-                data=corpo, headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                d = json.load(r)
-            return d["candidates"][0]["content"]["parts"][0]["text"]
-        except Exception as exc:
-            errori.append(f"{m}: {type(exc).__name__}")
-    raise RuntimeError("Nessun modello disponibile in questo momento. " + "; ".join(errori))
+        for n in range(tentativi):
+            try:
+                req = urllib.request.Request(
+                    f"{BASE}/{m}:generateContent?key={chiave()}",
+                    data=corpo, headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(req, timeout=timeout) as r:
+                    d = json.load(r)
+                return d["candidates"][0]["content"]["parts"][0]["text"]
+            except urllib.error.HTTPError as exc:
+                try:
+                    dettaglio = json.loads(exc.read().decode())["error"]["message"]
+                except Exception:
+                    dettaglio = str(exc.reason)
+                errori.append(f"{m} [{exc.code}]: {dettaglio}")
+                if exc.code in RITENTABILI and n < tentativi - 1:
+                    time.sleep(2 * (n + 1))
+                    continue
+                break
+            except Exception as exc:
+                errori.append(f"{m}: {type(exc).__name__}")
+                if n < tentativi - 1:
+                    time.sleep(2 * (n + 1))
+                    continue
+                break
+    if errori and all("[429]" in e or "[503]" in e for e in errori):
+        raise RuntimeError(
+            "I server di Google sono sovraccarichi in questo momento. "
+            "Riprova fra una decina di secondi: e' passeggero.")
+    raise RuntimeError("Nessun modello disponibile. " + " | ".join(errori))
 
 
 RIFORMULA = """Riscrivi la domanda nei termini usati dalla legge italiana, per cercare in un archivio normativo.
