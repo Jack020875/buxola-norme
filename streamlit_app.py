@@ -29,20 +29,31 @@ BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 MODELLI = ["gemini-3-flash-preview", "gemini-flash-lite-latest", "gemini-flash-latest"]
 
 
+def _pulisci(v: str) -> str:
+    """Toglie spazi, a capo e virgolette rimaste attaccate alla chiave.
+
+    Motivo: incollando la chiave nei Secrets e' facilissimo portarsi dietro
+    un a capo o una virgoletta. Google in quel caso NON dice "chiave
+    sbagliata": risponde 401 chiedendo un token OAuth, un messaggio che manda
+    a caccia del problema sbagliato. Meglio ripulire qui una volta per tutte.
+    """
+    return (v or "").strip().strip('"').strip("'").strip()
+
+
 def chiave() -> str:
     """La chiave arriva dai Secrets di Streamlit in produzione, dal file .env in locale."""
     try:
         if "API_KEY" in st.secrets:
-            return st.secrets["API_KEY"]
+            return _pulisci(st.secrets["API_KEY"])
     except Exception:
         pass
     if os.environ.get("API_KEY"):
-        return os.environ["API_KEY"]
+        return _pulisci(os.environ["API_KEY"])
     env = QUI.parent / ".env"
     if env.exists():
         for riga in env.read_text(encoding="utf-8").splitlines():
             if riga.startswith("API_KEY="):
-                return riga.split("=", 1)[1].strip()
+                return _pulisci(riga.split("=", 1)[1])
     return ""
 
 
@@ -85,6 +96,11 @@ def _genera(prompt: str, timeout: int = 90, tentativi: int = 3) -> str:
                     time.sleep(2 * (n + 1))
                     continue
                 break
+    if errori and any("[401]" in e or "[403]" in e or "API_KEY_INVALID" in e for e in errori):
+        raise RuntimeError(
+            "La chiave API non viene accettata da Google. Va ricontrollata nei "
+            "Secrets dell'app: dev'essere una sola riga, senza spazi e senza "
+            "a capo dopo l'ultimo carattere.")
     if errori and all("[429]" in e or "[503]" in e for e in errori):
         raise RuntimeError(
             "I server di Google sono sovraccarichi in questo momento. "
@@ -104,12 +120,18 @@ REGOLE = """Sei l'assistente normativo di una rete di consulenti assicurativi. P
 
 Rispondi ESCLUSIVAMENTE sulla base degli articoli riportati sotto.
 
-REGOLE:
-1. Se gli articoli non bastano, dillo apertamente e indica cosa manca. Non colmare i vuoti.
-2. Cita la fonte fra parentesi quadre esattamente come compare nell'intestazione dell'articolo.
-3. Se per rispondere serve un dato che non hai (grado di parentela, provincia di residenza, tipo di rapporto di lavoro, presenza di testamento), CHIEDI quel dato invece di ipotizzarlo.
-4. Non citare articoli, importi o date che non compaiono negli articoli forniti.
-5. Italiano asciutto e professionale. Nessuna premessa.
+Come rispondere:
+- Di' PRIMA quello che gli articoli permettono gia' di affermare, anche se la risposta non e' completa. Non aprire mai la risposta con una richiesta di dati.
+- Ricava dalla domanda i dati che sono gia' impliciti: chi dice "sono stato assunto" o "sono un dipendente" e' un lavoratore subordinato; chi dice "un mio cliente" parla di un terzo.
+- Solo DOPO, se resta un dato davvero mancante (grado di parentela, tipo di rapporto di lavoro, presenza di testamento, dinamica dell'infortunio), chiedilo in fondo, in una riga.
+- Se gli articoli non bastano, dillo apertamente e indica cosa manca. Non colmare i vuoti.
+
+Citazioni:
+- Fra parentesi quadre va SOLO il riferimento normativo, copiato esatto dall'intestazione dell'articolo, per esempio [D.P.R. 1124/1965, art. 2, comma 3].
+- Non citare mai queste istruzioni e non scrivere mai cose come "Regola 3": non sono fonti.
+- Non citare articoli, importi o date che non compaiono negli articoli forniti.
+
+Italiano asciutto e professionale. Nessuna premessa.
 
 ARTICOLI DISPONIBILI:
 {contesto}
@@ -117,9 +139,18 @@ ARTICOLI DISPONIBILI:
 DOMANDA DEL CONSULENTE: {domanda}"""
 
 
-@st.cache_resource(show_spinner="Carico l'archivio normativo…")
+@st.cache_resource(show_spinner="Preparo l'archivio normativo — al primo avvio serve un minuto…")
 def carica() -> Ricerca:
-    return Ricerca(INDICE)
+    """Carica indice E modello di ricerca.
+
+    Il modello si scaricherebbe da solo alla prima domanda: cosi' pero'
+    l'attesa cadrebbe sul consulente, dopo che ha gia' scritto, sotto la
+    scritta "Cerco negli articoli" che non spiega niente. Caricandolo qui
+    l'attesa avviene una volta sola all'avvio, con scritto perche'.
+    """
+    r = Ricerca(INDICE)
+    r.cerca("prova di avvio", k=1)
+    return r
 
 
 def rispondi(domanda: str, ricerca: Ricerca):
