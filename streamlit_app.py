@@ -119,9 +119,41 @@ st.markdown("""<style>
 st.title("🧭 Buxola Norme")
 st.caption("Assistente normativo della rete — previdenza, infortuni, disabilità, successioni e polizze")
 
+def codice_richiesto() -> str:
+    """Codice d'accesso condiviso, letto dai Secrets.
+
+    Se il segreto non e' impostato l'app resta aperta: cosi' una
+    dimenticanza non chiude fuori nessuno. Non e' un sistema di
+    autenticazione forte, e' una barriera contro il passante casuale che
+    altrimenti consumerebbe la quota gratuita."""
+    try:
+        return st.secrets.get("CODICE_ACCESSO", "")
+    except Exception:
+        return os.environ.get("CODICE_ACCESSO", "")
+
+
+def controlla_accesso() -> None:
+    atteso = codice_richiesto()
+    if not atteso or st.session_state.get("accesso_ok"):
+        return
+    st.markdown("#### Accesso riservato alla rete")
+    st.caption("Inserisci il codice che ti e' stato comunicato.")
+    with st.form("accesso"):
+        dato = st.text_input("Codice", type="password", label_visibility="collapsed")
+        if st.form_submit_button("Entra", type="primary"):
+            if dato.strip() == atteso.strip():
+                st.session_state.accesso_ok = True
+                st.rerun()
+            else:
+                st.error("Codice non valido.")
+    st.stop()
+
+
 if not chiave():
     st.error("Chiave API non configurata. Su Streamlit Cloud va inserita in Impostazioni → Secrets come `API_KEY`.")
     st.stop()
+
+controlla_accesso()
 
 ricerca = carica()
 
@@ -142,10 +174,10 @@ if "storia" not in st.session_state:
     st.session_state.storia = []
 
 ESEMPI = [
-    "Mio suocero ha l'Alzheimer, a cosa ho diritto come genero?",
     "La polizza vita rientra nell'asse ereditario?",
+    "Quanti giorni di permesso spettano per assistere un genitore con disabilità grave?",
     "Un cliente è caduto andando al lavoro in bici: è INAIL?",
-    "Due sorelle possono prendere entrambe i permessi 104 per la madre?",
+    "Cliente deceduto senza testamento, coniuge e due figli: come si divide?",
 ]
 
 if not st.session_state.storia:
