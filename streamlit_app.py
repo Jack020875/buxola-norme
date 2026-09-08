@@ -27,7 +27,14 @@ from ricerca import Ricerca
 QUI = Path(__file__).resolve().parent
 INDICE = QUI / "data" / "indice.pkl"
 BASE = "https://generativelanguage.googleapis.com/v1beta/models"
-MODELLI = ["gemini-3-flash-preview", "gemini-flash-lite-latest", "gemini-flash-latest"]
+# Ordine dei modelli per la risposta: prima quello che ha retto meglio nelle prove
+# (risposte estese e citate), poi gli altri come riserva.
+MODELLI = ["gemini-flash-latest", "gemini-3-flash-preview", "gemini-flash-lite-latest"]
+# Per riscrivere la domanda in termini giuridici serve un modello rapido, non uno
+# che ragiona: misurato su dieci domande con gli articoli attesi, questo e' piu'
+# veloce (0,5s contro 3s) e recupera meglio (8/10 contro 5/10), perche' i modelli
+# che "pensano" tendono ad astrarre la domanda e a perdere le parole della norma.
+MODELLI_RICERCA = ["gemini-flash-lite-latest", "gemini-flash-latest", "gemini-3-flash-preview"]
 
 
 def _pulisci(v: str) -> str:
@@ -58,10 +65,14 @@ def chiave() -> str:
     return ""
 
 
-RITENTABILI = {429, 500, 502, 503}
+# 503 e 500 sono sovraccarichi passeggeri: ha senso ritentare lo stesso modello.
+# 429 no: vuol dire quota esaurita, e non si libera in due secondi. Ritentarlo
+# faceva perdere sei secondi buoni per ogni chiamata prima di provare il modello
+# successivo, cioe' dodici secondi a domanda fra ricerca e risposta.
+RITENTABILI = {500, 502, 503}
 
 
-def _genera(prompt: str, timeout: int = 90, tentativi: int = 3) -> str:
+def _genera(prompt: str, timeout: int = 90, tentativi: int = 3, modelli: list[str] | None = None) -> str:
     """Chiede al modello di scrivere la risposta.
 
     I modelli gratuiti rispondono 503 quando sono sovraccarichi: e' una
@@ -72,7 +83,7 @@ def _genera(prompt: str, timeout: int = 90, tentativi: int = 3) -> str:
     """
     corpo = json.dumps({"contents": [{"parts": [{"text": prompt}]}]}).encode()
     errori = []
-    for m in MODELLI:
+    for m in (modelli or MODELLI):
         for n in range(tentativi):
             try:
                 req = urllib.request.Request(
@@ -106,6 +117,71 @@ def _genera(prompt: str, timeout: int = 90, tentativi: int = 3) -> str:
         raise RuntimeError(
             "I server di Google sono sovraccarichi in questo momento. "
             "Riprova fra una decina di secondi: e' passeggero.")
+    raise RuntimeError("Nessun modello disponibile. " + " | ".join(errori))
+
+
+def _genera_a_flusso(prompt: str, timeout: int = 120, tentativi: int = 3):
+    """Come _genera, ma restituisce il testo a pezzi mentre il modello lo scrive.
+
+    Non rende la risposta piu' rapida: la rende visibile subito. Attendere venti
+    secondi davanti a "Cerco negli articoli" e' un'altra cosa dal vedere il testo
+    comparire dopo due. Se il modello fallisce PRIMA di aver emesso qualcosa si
+    passa al successivo; se fallisce a meta' ci si ferma li', perche' ricominciare
+    con un altro modello raddoppierebbe il testo gia' a video.
+    """
+    corpo = json.dumps({"contents": [{"parts": [{"text": prompt}]}]}).encode()
+    errori = []
+    for m in MODELLI:
+        for n in range(tentativi):
+            emesso = False
+            try:
+                req = urllib.request.Request(
+                    f"{BASE}/{m}:streamGenerateContent?alt=sse&key={chiave()}",
+                    data=corpo, headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(req, timeout=timeout) as risposta:
+                    for riga in risposta:
+                        riga = riga.decode("utf-8", "ignore").strip()
+                        if not riga.startswith("data:"):
+                            continue
+                        blocco = riga[5:].strip()
+                        if not blocco or blocco == "[DONE]":
+                            continue
+                        try:
+                            d = json.loads(blocco)
+                        except json.JSONDecodeError:
+                            continue
+                        for cand in d.get("candidates", []):
+                            for parte in cand.get("content", {}).get("parts", []):
+                                if parte.get("text"):
+                                    emesso = True
+                                    yield parte["text"]
+                if emesso:
+                    return
+                errori.append(f"{m}: risposta vuota")
+                break
+            except urllib.error.HTTPError as exc:
+                if emesso:
+                    return
+                try:
+                    dettaglio = json.loads(exc.read().decode())["error"]["message"]
+                except Exception:
+                    dettaglio = str(exc.reason)
+                errori.append(f"{m} [{exc.code}]: {dettaglio}")
+                if exc.code in RITENTABILI and n < tentativi - 1:
+                    time.sleep(2 * (n + 1))
+                    continue
+                break
+            except Exception as exc:
+                if emesso:
+                    return
+                errori.append(f"{m}: {type(exc).__name__}")
+                if n < tentativi - 1:
+                    time.sleep(2 * (n + 1))
+                    continue
+                break
+    if errori and all("[429]" in e or "[503]" in e for e in errori):
+        raise RuntimeError("I server di Google sono sovraccarichi in questo momento. "
+                           "Riprova fra una decina di secondi: e' passeggero.")
     raise RuntimeError("Nessun modello disponibile. " + " | ".join(errori))
 
 
@@ -190,20 +266,25 @@ def _conversazione(storia: list[dict], battute: int = 2) -> str:
         for v in recenti)
 
 
-def rispondi(domanda: str, ricerca: Ricerca, storia: list[dict] | None = None):
+def prepara(domanda: str, ricerca: Ricerca, storia: list[dict] | None = None):
+    """Riformula e recupera gli articoli. E' la parte rapida: circa un secondo."""
     conversazione = _conversazione(storia or [])
     try:
         riscritta = _genera(RIFORMULA.format(d=domanda, storia=conversazione or "(nessuna)"),
-                            timeout=40).strip().split("\n")[0]
+                            timeout=40, modelli=MODELLI_RICERCA).strip().split("\n")[0]
     except Exception:
         riscritta = domanda      # se la traduzione fallisce si cerca la domanda originale
     trovati = ricerca.cerca(riscritta, k=8)
+    return trovati, riscritta, conversazione
+
+
+def scrivi_risposta(domanda: str, trovati, conversazione: str):
+    """Restituisce il testo a pezzi, man mano che il modello lo produce."""
     contesto = "\n\n".join(
         f"[{x.voce['citation']}] (vigente dal {x.voce.get('validity_start') or 'n.d.'})\n{x.voce['text']}"
         for x in trovati)
-    testo = _genera(REGOLE.format(contesto=contesto, domanda=domanda,
-                                  storia=conversazione or "(nessuna)"))
-    return testo, trovati, riscritta
+    return _genera_a_flusso(REGOLE.format(contesto=contesto, domanda=domanda,
+                                          storia=conversazione or "(nessuna)"))
 
 
 # ---------------------------------------------------------------- interfaccia
@@ -368,13 +449,19 @@ if domanda:
     with st.chat_message("user"):
         st.markdown(domanda)
     with st.chat_message("assistant"):
+        trovati, riscritta, conversazione = [], "", ""
         with st.spinner("Cerco negli articoli…"):
             try:
-                testo, trovati, riscritta = rispondi(domanda, ricerca, precedenti)
+                trovati, riscritta, conversazione = prepara(domanda, ricerca, precedenti)
             except Exception as exc:
-                testo, trovati, riscritta = f"⚠️ {exc}", [], ""
-        st.markdown(testo)
+                st.markdown(f"⚠️ {exc}")
         if trovati:
+            try:
+                # il testo compare mentre viene scritto, invece che tutto insieme alla fine
+                testo = st.write_stream(scrivi_risposta(domanda, trovati, conversazione))
+            except Exception as exc:
+                testo = f"⚠️ {exc}"
+                st.markdown(testo)
             citate = [x.voce for x in trovati if x.voce["citation"] in testo]
             mostrate = citate or [x.voce for x in trovati[:3]]
             etichetta = "Fonti citate" if citate else "Articoli esaminati (nessuno citato nella risposta)"
@@ -387,8 +474,6 @@ if domanda:
                 if riscritta:
                     st.caption(f"Cercato come: {riscritta}")
             st.session_state.storia.append({"ruolo": "assistant", "testo": testo, "fonti": mostrate})
-        else:
-            st.session_state.storia.append({"ruolo": "assistant", "testo": testo})
 
 st.caption("Informazione basata sui testi normativi indicizzati. Non sostituisce il parere "
            "di un professionista abilitato.")
